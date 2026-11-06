@@ -1,0 +1,77 @@
+name: Sign GmsCore Release APKs (temporary test key)
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - .github/workflows/sign-gmscore-test-apks.yml
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  sign-test-release:
+    name: Sign and verify Release APKs (test only)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download Release APKs from successful build
+        uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ github.token }}
+          repository: Matheuzeras/GmsCoreFork
+          run-id: 42238177625
+          name: GmsCore-Release-e427cb8
+          path: unsigned
+
+      - name: Generate temporary Android test signing key
+        shell: bash
+        run: |
+          set -euo pipefail
+          PASS="$(openssl rand -hex 24)"
+          echo "::add-mask::$PASS"
+          echo "KEYSTORE_PASSWORD=$PASS" >> "$GITHUB_ENV"
+          keytool -genkeypair -noprompt -keystore "$RUNNER_TEMP/gmscore-test.jks" \
+            -storepass "$PASS" -keypass "$PASS" -alias gmscore-test \
+            -keyalg RSA -keysize 3072 -validity 3650 \
+            -dname "CN=GmsCore temporary test build, OU=Test, O=Nonproduction, C=BR"
+          echo "Temporary key only. Do not use these APKs as production releases."
+
+      - name: Zipalign, sign and verify each Release APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          APK_SIGNER="$(find "${ANDROID_HOME}/build-tools" -mindepth 2 -maxdepth 2 -type f -name apksigner | sort -V | tail -1)"
+          if [[ -z "$APK_SIGNER" ]]; then echo "apksigner not found in Android SDK"; exit 1; fi
+          ZIP_ALIGN="${APK_SIGNER%/*}/zipalign"
+          if [[ ! -x "$ZIP_ALIGN" ]]; then echo "zipalign not found"; exit 1; fi
+          echo "Using $APK_SIGNER"
+          count=0
+          while IFS= read -r -d "" apk; do
+            rel="${apk#unsigned/}"
+            out="signed/$rel"
+            mkdir -p "$(dirname "$out")"
+            aligned="$(mktemp "$RUNNER_TEMP/aligned.XXXXXXXX.apk")"
+            "$ZIP_ALIGN" -f 4 "$apk" "$aligned"
+            "$APK_SIGNER" sign \
+              --ks "$RUNNER_TEMP/gmscore-test.jks" \
+              --ks-key-alias gmscore-test \
+              --ks-pass "pass:$KEYSTORE_PASSWORD" \
+              --key-pass "pass:$KEYSTORE_PASSWORD" \
+              --out "$out" "$aligned"
+            "$APK_SIGNER" verify --verbose "$out"
+            rm -f "$aligned"
+            echo "SIGNED: $out"
+            count=$((count + 1))
+          done < <(find unsigned -type f -name "*.apk" -print0)
+          if [[ "$count" -eq 0 ]]; then echo "No APKs found"; exit 1; fi
+          echo "$count Release APKs signed and verified"
+          (cd signed && find . -name "*.apk" -type f -print0 | xargs -0 sha256sum) > signed/SHA256SUMS.txt
+
+      - name: Upload signed APKs
+        uses: actions/upload-artifact@v4
+        with:
+          name: GmsCore-Release-Signed-TEST-KEY-e427cb8
+          path: signed/
+          retention-days: 30
+          if-no-files-found: error
