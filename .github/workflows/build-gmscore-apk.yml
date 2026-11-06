@@ -1,0 +1,58 @@
+name: Build microG GmsCore APKs
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - .github/workflows/build-gmscore-apk.yml
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build ${{ matrix.variant }} APKs
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [Debug, Release]
+    env:
+      GRADLE_MICROG_VERSION_WITHOUT_GIT: "1"
+
+    steps:
+      - name: Free disk space
+        run: |
+          sudo rm -rf /opt/hostedtoolcache/CodeQL /opt/hostedtoolcache/go
+          df -h
+
+      - name: Checkout original GmsCore revision
+        uses: actions/checkout@v7
+        with:
+          repository: Cmitchelle7/GmsCore
+          ref: e427cb84bb789f677c09a61ae9fed6153714a2cb
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v6
+
+      - name: Assemble ${{ matrix.variant }}
+        run: ./gradlew assemble${{ matrix.variant }}
+
+      - name: List built APKs
+        run: find . -type f -path "*/build/outputs/apk/*" -name "*.apk" -print
+
+      - name: Upload ${{ matrix.variant }} APK artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: GmsCore-${{ matrix.variant }}-e427cb8
+          path: "**/build/outputs/apk/**/*.apk"
+          if-no-files-found: error
+          retention-days: 30
