@@ -60,6 +60,40 @@ jobs:
       - name: List APK output files
         if: always()
         run: find play-services-core/build/outputs/apk -type f -name "*.apk" -print || true
+      - name: Sign Release APK using disposable TEST KEY for CorePatch experiment
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/facefix-sign" "$GITHUB_WORKSPACE/facefix-corepatch"
+          APK="$(find play-services-core/build/outputs/apk -type f -path "*/release/*.apk" -name "*.apk" -print -quit)"
+          test -f "$APK"
+          BT="$(find "$ANDROID_HOME/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -n 1)"
+          test -x "$BT/zipalign"
+          test -x "$BT/apksigner"
+          KEYSTORE="$RUNNER_TEMP/facefix-sign/test-only.jks"
+          PASS="$(openssl rand -hex 24)"
+          keytool -genkeypair -keystore "$KEYSTORE" -storepass "$PASS" -keypass "$PASS" -alias facefix -dname "CN=Experimental GmsCore FaceFix,OU=UNOFFICIAL,O=USER TEST" -keyalg RSA -keysize 3072 -validity 60 -storetype PKCS12 -noprompt
+          ALIGNED="$RUNNER_TEMP/facefix-sign/release-aligned.apk"
+          "$BT/zipalign" -f -p 4 "$APK" "$ALIGNED"
+          OUTPUT="$GITHUB_WORKSPACE/facefix-corepatch/GmsCore-FaceFix3899-CorePatch-TEST-SIGNED.apk"
+          "$BT/apksigner" sign --ks "$KEYSTORE" --ks-key-alias facefix --ks-pass "pass:$PASS" --key-pass "pass:$PASS" --min-sdk-version 19 --out "$OUTPUT" "$ALIGNED"
+          "$BT/apksigner" verify --verbose --print-certs --min-sdk-version 19 "$OUTPUT"
+          AAPT="$BT/aapt"
+          INFO="$("$AAPT" dump badging "$OUTPUT" | grep "^package:" | head -n 1)"
+          echo "$INFO"
+          [[ "$INFO" == *"name='com.google.android.gms'"* ]]
+          [[ "$INFO" == *"versionCode='252432035'"* ]]
+          [[ "$INFO" == *"versionName='0.3.17.252432-facefix3899'"* ]]
+          rm -f "$KEYSTORE"
+          echo "### UNSIGNED-ORIGINAL-CERT NOTICE" >> "$GITHUB_STEP_SUMMARY"
+          echo "The released CorePatch test APK is cryptographically signed with an EPHEMERAL TEST KEY, NOT the original NOGAPPS certificate. Use only on an intentionally modified Android device, at your own risk. No private signing key is retained." >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload GmsCore FaceFix CorePatch test-signed Release APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: GmsCore-FaceFix3899-CorePatch-TEST-SIGNED-Release
+          path: facefix-corepatch/GmsCore-FaceFix3899-CorePatch-TEST-SIGNED.apk
+          if-no-files-found: error
+          retention-days: 14
       - name: Upload GmsCore FaceFix Debug (NOT ROM-compatible signing)
         uses: actions/upload-artifact@v4
         with:
