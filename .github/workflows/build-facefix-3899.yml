@@ -18,6 +18,7 @@ jobs:
     timeout-minutes: 110
     env:
       GRADLE_MICROG_VERSION_WITHOUT_GIT: "1"
+      MICROG_FACEFIX_3899_BUILD: "1"
     steps:
       - name: Free disk space
         run: |
@@ -41,6 +42,21 @@ jobs:
         run: ./gradlew :play-services-core:assembleMapboxDefaultDebug
       - name: Build GmsCore unsigned release APK
         run: ./gradlew :play-services-core:assembleMapboxDefaultRelease
+      - name: Verify patched GmsCore package and upgrade version
+        shell: bash
+        run: |
+          set -euo pipefail
+          AAPT="$(find "$ANDROID_HOME/build-tools" -type f -name aapt | sort -V | tail -n 1)"
+          test -n "$AAPT"
+          mapfile -t apks < <(find play-services-core/build/outputs/apk -type f -name "*.apk")
+          test "${#apks[@]}" -ge 2
+          for apk in "${apks[@]}"; do
+            info="$("$AAPT" dump badging "$apk" | grep "^package:" | head -1)"
+            echo "$apk: $info"
+            [[ "$info" == *"name='com.google.android.gms'"* ]]
+            [[ "$info" == *"versionCode='252432035'"* ]]
+            [[ "$info" == *"versionName='0.3.17.252432-facefix3899'"* ]]
+          done
       - name: List APK output files
         if: always()
         run: find play-services-core/build/outputs/apk -type f -name "*.apk" -print || true
