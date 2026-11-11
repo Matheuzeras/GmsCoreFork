@@ -2,6 +2,10 @@ package dev.microg.facefix;
 
 import android.graphics.PointF;
 import android.graphics.Rect;
+import android.content.Context;
+import android.util.Log;
+import java.util.Set;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.ArrayList;
 import java.util.List;
 import de.robv.android.xposed.IXposedHookLoadPackage;
@@ -15,30 +19,104 @@ import de.robv.android.xposed.callbacks.XC_LoadPackage;
  * Does not alter identity checks, detection confidence or financial apps.
  */
 public final class FaceFixHook implements IXposedHookLoadPackage {
-    private static final String PKG = "com.google.android.gms";
+    private static final String GMS = "com.google.android.gms";
+    private static final String MP = "com.mercadopago.wallet";
+    private static final String ML = "com.mercadolibre.android";
     private static final String CLASS = "org.microg.gms.vision.face.mlkit.FaceDetector";
     private static final String TAG = "MicroGFaceFix";
+    private final AtomicBoolean installed = new AtomicBoolean(false);
+    private static final AtomicBoolean reported = new AtomicBoolean(false);
+    private final List<XC_MethodHook.Unhook> loadClassHooks = new ArrayList<>();
 
     @Override public void handleLoadPackage(XC_LoadPackage.LoadPackageParam lpparam) {
-        if (!PKG.equals(lpparam.packageName)) return;
+        // The face detector is loaded inside the client process, NOT only in GmsCore.
+        if (!MP.equals(lpparam.packageName) && !ML.equals(lpparam.packageName)) return;
+        report("v0.2 in process " + lpparam.processName);
+        tryInstall(lpparam.classLoader, "app loader");
+        // microG provides the detector using a remote package context.
         try {
-            Class<?> detector = XposedHelpers.findClassIfExists(CLASS, lpparam.classLoader);
-            if (detector == null) {
-                XposedBridge.log(TAG + ": detector class not found");
+            XposedHelpers.findAndHookMethod("android.app.ContextImpl", null,
+                    "createPackageContext", String.class, int.class, new XC_MethodHook() {
+                        @Override protected void afterHookedMethod(MethodHookParam p) {
+                            if (installed.get() || p.hasThrowable() || p.args == null ||
+                                p.args.length < 1 || !GMS.equals(p.args[0]) ||
+                                !(p.getResult() instanceof Context)) return;
+                            tryInstall(((Context)p.getResult()).getClassLoader(), "remote GmsCore context");
+                        }
+                    });
+        } catch (Throwable t) {
+            report("remote context watcher unavailable: " + t.getClass().getSimpleName());
+        }
+        // Fallback for classes loaded later by a DexClassLoader.
+        if (!installed.get()) {
+            try {
+                Set<XC_MethodHook.Unhook> handles =
+                    XposedBridge.hookAllMethods(ClassLoader.class, "loadClass", new XC_MethodHook() {
+                        @Override protected void afterHookedMethod(MethodHookParam p) {
+                            if (installed.get() || p.hasThrowable() || p.args == null ||
+                                p.args.length == 0 || !CLASS.equals(p.args[0])) return;
+                            if (p.getResult() instanceof Class) {
+                                attach((Class<?>)p.getResult(), "late class loading");
+                            }
+                        }
+                    });
+                synchronized (loadClassHooks) {
+                    loadClassHooks.addAll(handles);
+                    if (installed.get()) unwatch();
+                }
+                report("v0.2 waiting for detector in remote class loader");
+            } catch (Throwable t) {
+                report("late class watcher unavailable: " + t.getClass().getSimpleName());
+            }
+        }
+    }
+
+    private void tryInstall(ClassLoader loader, String from) {
+        if (installed.get() || loader == null) return;
+        try {
+            Class<?> cls = XposedHelpers.findClassIfExists(CLASS, loader);
+            if (cls != null) attach(cls, from);
+        } catch (Throwable t) {
+            report("class lookup unavailable: " + t.getClass().getSimpleName());
+        }
+    }
+
+    private synchronized void attach(Class<?> cls, String from) {
+        if (installed.get() || !CLASS.equals(cls.getName())) return;
+        try {
+            Set<XC_MethodHook.Unhook> methods =
+                XposedBridge.hookAllMethods(cls, "detectFaces", new XC_MethodHook() {
+                    @Override protected void afterHookedMethod(MethodHookParam p) {
+                        try { fixResult(p); }
+                        catch (Throwable t) {
+                            report("coordinate processing failed: " + t.getClass().getSimpleName());
+                        }
+                    }
+                });
+            if (methods.isEmpty()) {
+                report("detector class has no detectFaces method");
                 return;
             }
-            XposedBridge.hookAllMethods(detector, "detectFaces", new XC_MethodHook() {
-                @Override protected void afterHookedMethod(MethodHookParam p) {
-                    try { fixResult(p); }
-                    catch (Throwable t) {
-                        XposedBridge.log(TAG + ": postprocessing failed: " + t.getClass().getSimpleName());
-                    }
-                }
-            });
-            XposedBridge.log(TAG + ": hooked ML Kit detector");
+            installed.set(true);
+            report("v0.2 hooked ML Kit detector in " + from);
+            unwatch();
         } catch (Throwable t) {
-            XposedBridge.log(TAG + ": could not register hook: " + t.getClass().getSimpleName());
+            report("detector hook failed: " + t.getClass().getSimpleName());
         }
+    }
+
+    private void unwatch() {
+        synchronized (loadClassHooks) {
+            for (XC_MethodHook.Unhook hook : loadClassHooks) {
+                try { hook.unhook(); } catch (Throwable ignored) {}
+            }
+            loadClassHooks.clear();
+        }
+    }
+
+    private static void report(String message) {
+        Log.i(TAG, message);
+        XposedBridge.log(TAG + ": " + message);
     }
 
     private static void fixResult(XC_MethodHook.MethodHookParam p) {
@@ -50,8 +128,9 @@ public final class FaceFixHook implements IXposedHookLoadPackage {
         if (w < 2 || h < 2 || w > 16384 || h > 16384) return;
         for (Object face : (List<?>) p.getResult()) {
             if (face == null) continue;
-            try { fixFace(face, r, w, h); }
-            catch (Throwable t) { XposedBridge.log(TAG + ": malformed face record; skipped"); }
+            try { fixFace(face, r, w, h);
+                if (reported.compareAndSet(false, true)) report("v0.2 applied coordinate fix to face results"); }
+            catch (Throwable t) { report("face result skipped: " + t.getClass().getSimpleName()); }
         }
     }
 
@@ -73,10 +152,10 @@ public final class FaceFixHook implements IXposedHookLoadPackage {
         }
         List<List<PointF>> mappedContours = new ArrayList<>();
         for (Object contour : contours) {
-            int type = XposedHelpers.getIntField(contour, "type");
+            // Only remap original contour points; do not synthesize additional data.
             @SuppressWarnings("unchecked")
             List<PointF> points = (List<PointF>) XposedHelpers.getObjectField(contour, "pointsList");
-            List<PointF> resized = resize(points, type, src);
+            List<PointF> resized = points == null ? new ArrayList<PointF>() : points;
             List<PointF> mapped = new ArrayList<>();
             for (PointF pt : resized) mapped.add(map(pt, r, w, h));
             mappedContours.add(mapped);
@@ -111,48 +190,4 @@ public final class FaceFixHook implements IXposedHookLoadPackage {
             Math.round(Math.max(Math.max(a.y,b.y),Math.max(c.y,d.y))));
     }
 
-    private static int expected(int type) {
-        if (type==1) return 36;
-        if (type>=2 && type<=5) return 5;
-        if (type==6 || type==7) return 16;
-        if (type==8) return 11;
-        if (type>=9 && type<=11) return 9;
-        if (type==12) return 2;
-        if (type==13) return 3;
-        if (type==14 || type==15) return 1;
-        return 0;
-    }
-
-    /** Approximate contours only; not a substitute for precise facial geometry. */
-    private static List<PointF> resize(List<PointF> points, int type, Rect box) {
-        int want = expected(type);
-        if (points == null || points.isEmpty() || want == 0) return new ArrayList<>();
-        if (points.size() >= want) return new ArrayList<>(points);
-        List<PointF> out = new ArrayList<>(want);
-        if (type==1 || type==6 || type==7) {
-            PointF center=type==1 ? new PointF(box.exactCenterX(),box.exactCenterY()) : points.get(0);
-            float rx=Math.max(1,box.width()*(type==1 ? .5f : .09f));
-            float ry=Math.max(1,box.height()*(type==1 ? .5f : .045f));
-            for (int i=0;i<want;i++) {
-                double a=2.0*Math.PI*i/want;
-                out.add(new PointF(center.x+(float)Math.cos(a)*rx,center.y+(float)Math.sin(a)*ry));
-            }
-        } else if (points.size()==1) {
-            PointF center=points.get(0);
-            float rx=Math.max(1,box.width()*.07f);
-            for (int i=0;i<want;i++) {
-                float t=want==1?.5f:(float)i/(want-1);
-                out.add(new PointF(center.x+(t-.5f)*2f*rx,center.y));
-            }
-        } else {
-            for(int i=0;i<want;i++) {
-                float pos=(float)i*(points.size()-1)/(want-1);
-                int index=(int)Math.floor(pos), next=Math.min(index+1,points.size()-1);
-                float t=pos-index;
-                PointF a=points.get(index), b=points.get(next);
-                out.add(new PointF(a.x+(b.x-a.x)*t,a.y+(b.y-a.y)*t));
-            }
-        }
-        return out;
-    }
 }

@@ -1,25 +1,30 @@
-# microG FaceFix Runtime — Experimental LSPosed module
+# MicroG FaceFix v0.2 experimental (LSPosed / Vector)
 
-**Unverified prototype.** The official-signed GmsCore 0.3.17.252432 is installed as an UPDATED_SYSTEM_APP at /data/app and the ROM baseline 0.3.16 at /product/priv-app. Its signing cert SHA256 is **9bd06727e62796c0130eb6dab39b73157451582cbd138e86c468acc395d14165**, which is not reproduced by the PR3899 GitHub debug APK.
+**Compatibilidade em investigação; ainda nao testado no Mercado Pago.**
 
-The module attempts to correct coordinates returned from the rotated face detection frame and contour list lengths in the microG ML Kit path. It is not a replacement for upstream microG PR #3899, does not include OpenCV memory-leak fixes and is **not validated with Mercado Pago or Mercado Livre**.
+## Descoberta nos logs
+O logcat de 11/11/2026 confirma FaceDetection no PID do com.mercadopago.wallet, seguido de SIGSEGV em libhwui.so / YuvImage.compressToJpeg quando o detector acha um rosto. A v0.1 so registrava hook para com.google.android.gms, deixando o processo real sem a correcao.
 
-## Build
+## Alteracoes
+- Legacy Xposed, scope recomendado: com.mercadopago.wallet e com.mercadolibre.android.
+- Intercepta FaceDetector do microG carregado no processo do app, inclusive carregamento por classloader remoto.
+- Corrige coordenadas de retangulo/landmarks/contours apos rotacao, preservando as contagens originais e os dados de confianca. Nao altera verificacao de identidade ou app financeiro.
+- Registra no logcat MicroGFaceFix: v0.2 in process, v0.2 hooked ML Kit detector, e v0.2 applied coordinate fix to face results (somente quando houver faces).
+- Nao registra dados biometricos ou imagens.
 
-Use JDK17 and Android SDK. From repository root:
+## Como testar
+1. Este arquivo e um APK LSPosed/Vector, nao um modulo ZIP do KernelSU.
+2. Instale o APK mais recente; se o Android rejeitar a atualizacao devido a chave de debug efemera, desinstale APENAS o app dev.microg.facefix antigo, e nao o GmsCore.
+3. Habilite o modulo no Vector/LSPosed e selecione explicitamente Mercado Pago e Mercado Livre (nao basta selecionar microG).
+4. Reinicie o aparelho para recarregar o modulo.
+5. Execute no Windows CMD: adb logcat -c
+6. Reproduza uma falha uma vez.
+7. Execute: adb logcat -d -v time | findstr /I /C:"MicroGFaceFix" /C:"FaceDetection" > facefix-v02.txt
+8. Execute: adb logcat -b crash -v time -d > crash-v02.txt
+9. Verifique se aparecem as tres mensagens na mesma tentativa. Registro do hook sozinho NAO prova execucao do mapeamento.
 
-    ./gradlew -p experiments/lsposed-facefix :app:assembleDebug
+## Reversao
+Desabilite o modulo pelo Vector/LSPosed e reinicie. Nao desinstale o microG nem altere o aplicativo Mercado Pago.
 
-The Android APK is at app/build/outputs/apk/debug/app-debug.apk under the project. A separate GitHub Actions workflow publishes this APK.
-
-## Installation / rollback
-
-1. For KernelSU Next: configure a compatible Zygisk implementation such as ZygiskNext, then LSPosed or Vector.
-2. Install the module APK with adb install (it is **NOT** a KernelSU ZIP).
-3. Enable the module in the LSPosed manager with **only com.google.android.gms** selected as scope.
-4. Restart to reload microG, then inspect LSPosed logs for "MicroGFaceFix".
-5. If a crash persists or new errors appear: disable this module in LSPosed and reboot.
-
-It never replaces GmsCore, modifies app data, grants authentication, or bypasses integrity checks. Detection contours are approximated, not a facial identity. The crash can remain if it has other causes. Test at your own risk.
-
-Reference: https://github.com/microg/GmsCore/pull/3899
+## Limites
+Esta correcao nao equivale ao PR upstream #3899 completo; ela nao inclui liberacao de memoria Mat ou contornos aproximados de 36 pontos e pode nao resolver falhas nativas distintas. Hook em processos de apps financeiros pode disparar politicas de integridade; nenhum bypass esta incluido.

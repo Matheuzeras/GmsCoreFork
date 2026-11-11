@@ -6,8 +6,8 @@ android {
         applicationId 'dev.microg.facefix'
         minSdk 26
         targetSdk 29
-        versionCode 1
-        versionName '0.1-preview'
+        versionCode 2
+        versionName '0.2-experimental'
     }
     buildTypes { release { minifyEnabled false } }
     compileOptions {
