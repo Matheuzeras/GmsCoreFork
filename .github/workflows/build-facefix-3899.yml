@@ -1,0 +1,60 @@
+name: Build microG FaceFix PR3899 APKs
+
+on:
+  push:
+    branches:
+      - fix/mlkit-face-coordinates-3899
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify-and-build:
+    name: Verify ML Kit and build GmsCore APKs
+    runs-on: ubuntu-latest
+    timeout-minutes: 110
+    env:
+      GRADLE_MICROG_VERSION_WITHOUT_GIT: "1"
+    steps:
+      - name: Free disk space
+        run: |
+          sudo rm -rf /opt/hostedtoolcache/CodeQL /opt/hostedtoolcache/go
+          df -h
+      - name: Checkout this repository's patched source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+      - name: Test rotation coordinate mapping
+        run: ./gradlew :play-services-vision-core:testDebugUnitTest
+      - name: Build GmsCore debug APK (ephemeral debug signature)
+        run: ./gradlew :play-services-core:assembleMapboxDefaultDebug
+      - name: Build GmsCore unsigned release APK
+        run: ./gradlew :play-services-core:assembleMapboxDefaultRelease
+      - name: List APK output files
+        if: always()
+        run: find play-services-core/build/outputs/apk -type f -name "*.apk" -print || true
+      - name: Upload GmsCore FaceFix Debug (NOT ROM-compatible signing)
+        uses: actions/upload-artifact@v4
+        with:
+          name: GmsCore-FaceFix3899-MapboxDefault-Debug-TEST-KEY
+          path: play-services-core/build/outputs/apk/**/debug/*.apk
+          if-no-files-found: error
+          retention-days: 14
+      - name: Upload GmsCore FaceFix Release (UNSIGNED)
+        uses: actions/upload-artifact@v4
+        with:
+          name: GmsCore-FaceFix3899-MapboxDefault-Release-UNSIGNED
+          path: play-services-core/build/outputs/apk/**/release/*.apk
+          if-no-files-found: error
+          retention-days: 14
