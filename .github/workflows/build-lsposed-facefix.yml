@@ -1,0 +1,29 @@
+name: Build experimental microG FaceFix LSPosed APK
+on:
+  push:
+    branches:
+      - experimental/lsposed-facefix-runtime-0317
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build:
+    name: Assemble experimental LSPosed module APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Assemble APK from this repository's code
+        run: ./gradlew -p experiments/lsposed-facefix :app:assembleDebug
+      - name: Upload experimental APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: MicroG-FaceFix-LSPosed-EXPERIMENTAL
+          path: experiments/lsposed-facefix/app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+          retention-days: 21
